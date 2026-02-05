@@ -1,5 +1,5 @@
 import pika
-from config import settings
+from src.config import settings
 
 
 class RabbitConnectorClass:

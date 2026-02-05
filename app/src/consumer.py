@@ -2,9 +2,9 @@ import logging
 import pika, sys, os
 import pydantic_core
 from sqlalchemy.exc import SQLAlchemyError
-from rabbitmq import rabbit_connector
-from db import ConsumedData, create_if_not_exist, Session_pg, insert_values
-from config import settings
+from src.rabbitmq import rabbit_connector
+from src.db import ConsumedData, create_if_not_exist, Session_pg, insert_values
+from src.config import settings
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=settings.log_level.upper(),

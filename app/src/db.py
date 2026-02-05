@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import BigInteger, Identity, create_engine, DateTime, func, text, insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.dialects.postgresql import JSON
-from config import settings
+from src.config import settings
 
 
 engine_pg = create_engine(f'postgresql://{settings.pg_user}:{settings.pg_pass}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}', echo=False)
