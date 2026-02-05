@@ -31,8 +31,8 @@ class Messages(PgBase):
     __tablename__ = 'messages'
 
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    processed_at: Mapped[datetime]
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    processed_at: Mapped[datetime | None]
 
 
 def create_if_not_exist(session_pg) -> None:
