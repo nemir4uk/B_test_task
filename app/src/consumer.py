@@ -1,9 +1,11 @@
+import asyncio
 import logging
-import pika, sys, os
+import aio_pika
+from aio_pika import Message, DeliveryMode
 import pydantic_core
 from sqlalchemy.exc import SQLAlchemyError
 from src.rabbitmq import rabbit_connector
-from src.db import ConsumedData, create_if_not_exist, Session_pg, insert_values
+from src.db import ConsumedData, create_if_not_exist, Async_Session_pg, insert_values
 from src.config import settings
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -12,104 +14,115 @@ logging.basicConfig(
 )
 
 
-def callback_with_retry(ch, method, properties, body):
-    logger.info('message received')
-    headers = properties.headers or {}
-    death_headers = headers.get('x-death')
-    retry_count = 0
-    if death_headers:
-        retry_count = death_headers[0].get('count', 0)
-    max_retries = settings.retry_count
-    try:
-        data = ConsumedData.model_validate_json(body)
-        insert_values(Session_pg, data.model_dump(mode="json"))
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    except pydantic_core._pydantic_core.ValidationError:
-        logger.error(f'pydantic ValidationError with message {body}')
-        logger.error('sent to the dead queue')
-        ch.basic_publish(
-            exchange='dlx',
-            routing_key='failed',
-            body=body,
-            properties=pika.BasicProperties(
-                headers={'x-retry-count': retry_count, 'x-error': 'ValidationError'}
-            )
-        )
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    except SQLAlchemyError:
-        logger.info('SQLAlchemyError')
-        if retry_count < max_retries:
-            ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
-        else:
-            logger.error('SQLAlchemyError, exceeded number of retry -> to dead queue')
-            ch.basic_publish(
-                exchange='dlx',
-                routing_key='failed',
-                body=body,
-                properties=pika.BasicProperties(
-                    headers={'x-retry-count': retry_count, 'x-error': 'Exceeded number of retry'}
-                )
-            )
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-    except Exception as e:
-        logging.critical(f'Unexpected error {e}')
-        ch.basic_publish(
-            exchange='dlx',
-            routing_key='failed',
-            body=body,
-            properties=pika.BasicProperties(
-                headers={'x-retry-count': retry_count, 'x-error': 'Unexpected error'}
-            )
-        )
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+async def callback_with_retry(message: aio_pika.IncomingMessage):
+    async with message.process(ignore_processed=True):
+        logger.info("message received")
 
+        headers = message.headers or {}
+        death_headers = headers.get("x-death")
+        retry_count = 0
 
-def main():
-    create_if_not_exist(Session_pg)
-    with rabbit_connector as conn:
-        channel = conn.channel()
-# dead letters
-        channel.exchange_declare(exchange='dlx', exchange_type='direct', durable=True)
-        channel.queue_declare(queue='dead_letters', durable=True)
-        channel.queue_bind(exchange='dlx', queue='dead_letters', routing_key='failed')
-# retry
-        channel.exchange_declare(exchange='retry', exchange_type='direct', durable=True)
-        channel.queue_declare(
-            queue='retry_5s',
-            durable=True,
-            arguments={
-                'x-dead-letter-exchange': 'main',
-                'x-dead-letter-routing-key': settings.rabbit_queue,
-                'x-message-ttl': 5000
-            }
-        )
-        channel.queue_bind(exchange='retry', queue='retry_5s', routing_key='retry')
-# main
-        channel.exchange_declare(exchange='main', exchange_type='direct', durable=True)
-        channel.queue_declare(
-            queue=settings.rabbit_queue,
-            durable=True,
-            arguments={
-                'x-dead-letter-exchange': 'retry',
-                'x-dead-letter-routing-key': 'retry'
-            }
-        )
-        channel.queue_bind(
-            exchange='main',
-            queue=settings.rabbit_queue,
-            routing_key=settings.rabbit_queue
-        )
+        if death_headers:
+            retry_count = death_headers[0].get("count", 0)
 
-        channel.basic_consume(queue=settings.rabbit_queue, on_message_callback=callback_with_retry, auto_ack=False)
-        channel.start_consuming()
+        max_retries = settings.retry_count
+        body = message.body
+        channel = message.channel
 
-
-if __name__ == '__main__':
-    logger.info('Start main process')
-    try:
-        main()
-    except KeyboardInterrupt:
         try:
-            sys.exit(0)
-        except SystemExit:
-            os._exit(0)
+            data = ConsumedData.model_validate_json(body)
+            await insert_values(Async_Session_pg, data.model_dump(mode="json"))
+            await message.ack()
+
+        except pydantic_core._pydantic_core.ValidationError:
+            logger.error(f"pydantic ValidationError with message {body}")
+            logger.error("sent to the dead queue")
+            await channel.default_exchange.publish(
+                Message(
+                    body,
+                    headers={
+                        "x-retry-count": retry_count,
+                        "x-error": "ValidationError",
+                    },
+                    delivery_mode=DeliveryMode.PERSISTENT,
+                ),
+                routing_key="failed",
+            )
+            await message.ack()
+
+        except SQLAlchemyError:
+            logger.info("SQLAlchemyError")
+            if retry_count < max_retries:
+                await message.reject(requeue=False)
+            else:
+                logger.error("SQLAlchemyError, exceeded number of retry -> to dead queue")
+                await channel.default_exchange.publish(
+                    Message(
+                        body,
+                        headers={
+                            "x-retry-count": retry_count,
+                            "x-error": "Exceeded number of retry",
+                        },
+                        delivery_mode=DeliveryMode.PERSISTENT,
+                    ),
+                    routing_key="failed",
+                )
+                await message.ack()
+
+        except Exception as e:
+            logging.critical(f"Unexpected error {e}")
+            await channel.default_exchange.publish(
+                Message(
+                    body,
+                    headers={
+                        "x-retry-count": retry_count,
+                        "x-error": "Unexpected error",
+                    },
+                    delivery_mode=DeliveryMode.PERSISTENT,
+                ),
+                routing_key="failed",
+            )
+            await message.ack()
+
+
+async def main():
+    await create_if_not_exist(Async_Session_pg)
+    async with rabbit_connector as connection:
+        channel = await connection.channel()
+# dead letters
+        dlx = await channel.declare_exchange("dlx", type='direct', durable=True)
+        dead_queue = await channel.declare_queue("dead_letters", durable=True)
+        await dead_queue.bind(dlx, "failed")
+# retry
+        retry_exchange = await channel.declare_exchange("retry", type='direct', durable=True)
+        retry_queue = await channel.declare_queue(
+            "retry_5s",
+            durable=True,
+            arguments={
+                "x-dead-letter-exchange": "main",
+                "x-dead-letter-routing-key": settings.rabbit_queue,
+                "x-message-ttl": 5000,
+            },
+        )
+        await retry_queue.bind(retry_exchange, "retry")
+# main
+        main_exchange = await channel.declare_exchange("main", type='direct', durable=True)
+        queue = await channel.declare_queue(
+            settings.rabbit_queue,
+            durable=True,
+            arguments={
+                "x-dead-letter-exchange": "retry",
+                "x-dead-letter-routing-key": "retry",
+            },
+        )
+        await queue.bind(main_exchange, settings.rabbit_queue)
+        await queue.consume(callback_with_retry)
+        logger.info("Start consuming...")
+        await asyncio.Future()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

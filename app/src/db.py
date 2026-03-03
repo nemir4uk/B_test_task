@@ -1,15 +1,19 @@
 from datetime import datetime
 from typing import Any, Dict
 from pydantic import BaseModel
-from sqlalchemy import BigInteger, Identity, create_engine, DateTime, func, text, insert
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy import BigInteger, Identity, DateTime, func, text, insert
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from src.config import settings
 
 
-engine_pg = create_engine(f'postgresql://{settings.pg_user}:{settings.pg_pass}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}', echo=False)
+async_engine_pg = create_async_engine(f'postgresql+asyncpg://{settings.pg_user}:{settings.pg_pass}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}',
+                                      echo=False,
+                                      pool_size=10,
+                                      max_overflow=20)
 
-Session_pg = sessionmaker(bind=engine_pg)
+Async_Session_pg = async_sessionmaker(async_engine_pg, class_=AsyncSession, expire_on_commit=False)
 
 
 class Metadata(BaseModel):
@@ -35,8 +39,8 @@ class Messages(PgBase):
     processed_at: Mapped[datetime | None]
 
 
-def create_if_not_exist(session_pg) -> None:
-    with session_pg() as session:
+async def create_if_not_exist(async_session_pg) -> None:
+    async with async_session_pg() as session:
         stmt = text("""CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
         payload JSON NOT NULL,
@@ -47,8 +51,8 @@ def create_if_not_exist(session_pg) -> None:
         session.commit()
 
 
-def insert_values(session_pg, payload) -> None:
-    with session_pg() as session:
+async def insert_values(async_session_pg, payload) -> None:
+    async with async_session_pg() as session:
         stmt = insert(Messages).values(payload=payload)
         session.execute(stmt)
         session.commit()
